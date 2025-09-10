@@ -13,7 +13,8 @@
     "types": ["node"],
     "baseUrl": "./src",
     "paths": {
-      "@/*": ["*"]
+      "@/*": ["*"],
+      "@modules/*": ["modules/*"]
     }
   },
   "include": ["src"]
