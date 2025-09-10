@@ -1,6 +1,7 @@
 import { Telegraf, type Context, Markup } from 'telegraf';
 import { ensureUserFromCtx } from '@/supabase';
 import type { Role } from '@/types';
+import { showHome } from './home';
 
 export function register(bot: Telegraf<Context>) {
   bot.command('role', async (ctx: Context) => {
@@ -24,17 +25,20 @@ export function register(bot: Telegraf<Context>) {
 
     await ensureUserFromCtx(ctx, { role });
 
-    await ctx.editMessageText(
+    await ctx.deleteMessage();
+    await ctx.reply(
       `Роль установлена: ${role === 'DRIVER' ? 'Водитель' : role === 'COURIER' ? 'Курьер' : 'Клиент'}`
     );
 
     if (role === 'DRIVER' || role === 'COURIER') {
       await ctx.reply(
-        'Для доступа к заказам пройдите проверку:',
-        Markup.inlineKeyboard([
-          [Markup.button.callback('✅ Пройти проверку', 'go_verify')]
-        ])
+        'Поделитесь контактом, чтобы получать заказы:',
+        Markup.keyboard([[Markup.button.contactRequest('📱 Поделиться контактом')]])
+          .oneTime()
+          .resize()
       );
+    } else {
+      await showHome(ctx);
     }
   });
 }
