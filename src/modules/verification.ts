@@ -1,119 +1,138 @@
-import { Markup } from 'telegraf';
-import { bot } from '../bot';
-import type { MyContext, VerifFile } from '../types';
-import { getSetting } from '../supabase';
-import { upsertProfile } from './shared';
-import { nowIso, replaceWith, sendEphemeral } from '../utils';
-import { supabase, singleOrNull } from '../supabase';
-import { kbBackHome } from './home';
-import { saveTelegramFileToStorage } from '../storage';
-import { isAdmin } from '../utils';
+import { Telegraf, type Context, Markup } from 'telegraf';
+import type { VerifFile, Role } from '@/types';
+import { ensureSession, sendReplacing } from '@/shared';
+import {
+  createVerification,
+  setVerificationStatus,
+  getSetting
+} from '@/supabase';
 
-const rejectWait = new Map<number, { userId: number }>();
+const pendingReasonByMsg = new Map<number, number>(); // msg_id → userId
 
-export function installVerification() {
-  bot.action('drv_verify', async (ctx) => {
+function instructionsByRole(role: Role | undefined) {
+  if (role === 'DRIVER')
+    return 'Отправьте фото водительского удостоверения и селфи с удостоверением.';
+  if (role === 'COURIER')
+    return 'Отправьте фото удостоверения личности с обеих сторон.';
+  return 'Отправьте документы для проверки.';
+}
+
+export function register(bot: Telegraf<Context>) {
+  bot.action('go_verify', async (ctx: Context) => {
     await ctx.answerCbQuery();
-    const profile = await singleOrNull<{ actor_role: 'TAXI'|'COURIER' }>(
-      supabase.from('driver_profiles').select('actor_role').eq('user_telegram_id', ctx.from!.id)
-    );
-    const role = (profile.data?.actor_role ?? 'TAXI') as ('TAXI'|'COURIER');
-    ctx.session = ctx.session || {};
-    ctx.session.verif = { collecting: true, files: [], role, stepMsg: (ctx as any).callbackQuery?.message?.message_id || null };
-    const instr = role === 'TAXI'
-      ? 'Отправьте 2–3 фото: 1) водительское удостоверение, 2) селфи с удостоверением.'
-      : 'Отправьте 2 фото: удостоверение личности с обеих сторон.';
-    try { await (ctx as any).deleteMessage?.(); } catch { }
-    return sendEphemeral(ctx, `${instr}\nКаждый файл/фото присылайте сообщением. Когда закончите — нажмите «Готово». (0 загружено)`,
+    const s = ensureSession(ctx);
+    s.collecting = true;
+    s.files = [];
+    await sendReplacing(
+      ctx,
+      `${instructionsByRole(s.role)}\nФайло-счётчик: 0`,
       Markup.inlineKeyboard([
-        [Markup.button.callback('🟢 Готово, отправить на проверку', 'ver_submit')],
-        [Markup.button.callback('🔙 На главную', 'go_home')]
-      ]));
+        [Markup.button.callback('📤 Отправить на проверку', 'verif_send')]
+      ])
+    );
   });
 
-  // media aggregator в едином middleware будет вызывать этот обработчик:
-  // экспортируем функцию и подключим в registry в orders.ts (или index)
-}
+  bot.on(['photo', 'document'], async (ctx: Context) => {
+    const s = ensureSession(ctx);
+    if (!s.collecting) return;
 
-export async function verifMediaHandler(ctx: MyContext): Promise<boolean> {
-  if (!ctx.session?.verif?.collecting) return false;
-  const files: VerifFile[] = ctx.session.verif.files;
-  const msg: any = ctx.message;
-  if (msg.photo) {
-    const ph = msg.photo[msg.photo.length - 1];
-    files.push({ kind: 'photo', file_id: ph.file_id, caption: msg.caption || '' });
-  } else if (msg.document) {
-    files.push({ kind: 'document', file_id: msg.document.file_id, caption: msg.caption || '' });
-  } else {
-    return false;
-  }
-  await sendEphemeral(ctx, `Принято. Загружено: ${files.length}. Когда закончите — «Готово».`, kbBackHome());
-  return true;
-}
+    const files = s.files as VerifFile[];
+    const m = ctx.message;
+    if (!m) return;
 
-export function installVerificationActions() {
-  bot.action('ver_submit', async (ctx) => {
-    await ctx.answerCbQuery();
-    const vf = ctx.session?.verif;
-    if (!vf || !vf.files?.length) return replaceWith(ctx, 'Нужно прислать хотя бы одно фото/документ.', kbBackHome());
-    const verifyChannelId = Number(await getSetting('verify_channel_id')) || 0;
-    if (!verifyChannelId) return replaceWith(ctx, 'Канал модерации не привязан. Выполните /bind_verify_channel в канале.', kbBackHome());
-
-    for (const [i, f] of vf.files.entries()) {
-      await saveTelegramFileToStorage(ctx.from!.id, 'VERIFY', f.file_id, undefined, { index: i, role: vf.role });
-    }
-
-    const header =
-      `🪪 <b>Новая заявка на верификацию</b>\n` +
-      `Исполнитель: <a href="tg://user?id=${ctx.from!.id}">${(ctx.from as any).first_name || ctx.from!.id}</a>\n` +
-      `ID: <code>${ctx.from!.id}</code>\nРоль: <b>${vf.role}</b>\nФайлы выгружены в Storage (media_assets: kind=VERIFY).`;
-
-    try {
-      await bot.telegram.sendMessage(verifyChannelId, header, {
-        parse_mode: 'HTML',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('✅ Принять', `ver_approve:${ctx.from!.id}`),
-          Markup.button.callback('❌ Отклонить', `ver_reject:${ctx.from!.id}`)]
-        ])
+    if ('photo' in m && Array.isArray(m.photo)) {
+      const p = m.photo[m.photo.length - 1];
+      files.push({ file_id: p.file_id });
+    } else if ('document' in m && m.document) {
+      files.push({
+        file_id: m.document.file_id,
+        file_name: m.document.file_name ?? undefined,
+        mime_type: m.document.mime_type ?? undefined,
+        size: m.document.file_size ?? undefined
       });
-    } catch (e) { console.error('ver_submit send', e); return replaceWith(ctx, 'Не удалось отправить модераторам.', kbBackHome()); }
-
-    ctx.session.verif = null;
-    return replaceWith(ctx, 'Заявка отправлена. Ожидайте проверки.', kbBackHome());
-  });
-
-  bot.action(/ver_approve:(\d+)/, async (ctx) => {
-    if (!isAdmin(ctx)) return ctx.answerCbQuery('Только модераторы.');
-    await ctx.answerCbQuery('OK');
-    const uid = Number((ctx.match as any)[1]);
-    await upsertProfile(uid, { status: 'APPROVED', verified_at: nowIso(), verified_by: ctx.from!.id });
-    try { await (ctx as any).editMessageReplyMarkup?.({ inline_keyboard: [] }); } catch { }
-    try {
-      await bot.telegram.sendMessage(uid,
-        '✅ Проверка пройдена. Для доступа к заказам нужна подписка: 7/15/30 дней. Нажмите «Купить подписку».',
-        Markup.inlineKeyboard([[Markup.button.callback('🛒 Купить подписку', 'sub_buy')], [Markup.button.callback('🔙 На главную', 'go_home')]])
-      );
-    } catch { }
-  });
-
-  bot.action(/ver_reject:(\d+)/, async (ctx) => {
-    if (!isAdmin(ctx)) return ctx.answerCbQuery('Только модераторы.');
-    await ctx.answerCbQuery('Пришлите причину одним сообщением в этот же канал');
-    rejectWait.set(ctx.from!.id, { userId: Number((ctx.match as any)[1]) });
-  });
-
-  bot.on('text', async (ctx, next) => {
-    const chId = (ctx.chat as any)?.id;
-    const modId = ctx.from?.id || 0;
-    const pending = rejectWait.get(modId);
-    if (chId && pending) {
-      const reason = (ctx.message as any).text.trim();
-      rejectWait.delete(modId);
-      await upsertProfile(pending.userId, { status: 'REJECTED', verify_comment: reason, verified_at: null, verified_by: null });
-      try { await (ctx as any).editMessageReplyMarkup?.({ inline_keyboard: [] }); } catch { }
-      try { await bot.telegram.sendMessage(pending.userId, `❌ Верификация отклонена.\nПричина: ${reason}`); } catch { }
-      return;
     }
-    return next();
+    await sendReplacing(
+      ctx,
+      `Файло-счётчик: ${files.length}`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('📤 Отправить на проверку', 'verif_send')]
+      ])
+    );
+  });
+
+  bot.action('verif_send', async (ctx: Context) => {
+    await ctx.answerCbQuery();
+    const s = ensureSession(ctx);
+    const files = (s.files ?? []) as VerifFile[];
+    const verifyChan = await getSetting('verify_channel_id');
+    if (!verifyChan)
+      return ctx.reply(
+        'Канал модерации не привязан. Запустите /bind_verify_channel внутри канала модерации.'
+      );
+
+    await createVerification((ctx.from as any).id, (s.role ?? 'DRIVER'), files);
+
+    const list =
+      files.map((f, i) => `${i + 1}. ${f.file_name ?? f.file_id}`).join('\n') ||
+      '(пусто)';
+    const m = await ctx.telegram.sendMessage(
+      verifyChan,
+      `Новая заявка на проверку
+Пользователь: @${(ctx.from as any).username ?? (ctx.from as any).id}
+Роль: ${s.role}
+Файлы:
+${list}`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('✅ Принять', `mod_accept:${(ctx.from as any).id}`)],
+        [Markup.button.callback('❌ Отклонить', `mod_reject:${(ctx.from as any).id}`)]
+      ])
+    );
+
+    pendingReasonByMsg.set((m as any).message_id, (ctx.from as any).id);
+
+    s.collecting = false;
+    s.files = [];
+    await sendReplacing(ctx, 'Заявка отправлена. Ожидайте решения модерации.');
+  });
+
+  bot.action(/mod_accept:(\d+)/, async (ctx: Context) => {
+    await ctx.answerCbQuery();
+    const match = (ctx as any).match as RegExpExecArray | undefined;
+    if (!match) return;
+    const userId = Number(match[1]);
+    await setVerificationStatus(userId, 'APPROVED');
+    await ctx.editMessageText(`Заявка пользователя ${userId} — ✅ принята.`);
+    try {
+      await ctx.telegram.sendMessage(
+        userId,
+        'Поздравляем! Верификация пройдена. Доступ к заказам открывается после приобретения подписки. Нажмите «Купить подписку».',
+        Markup.inlineKeyboard([[Markup.button.callback('💳 Купить подписку', 'sub_buy')]])
+      );
+    } catch {}
+  });
+
+  bot.action(/mod_reject:(\d+)/, async (ctx: Context) => {
+    await ctx.answerCbQuery('Ответьте на это сообщение причиной отказа.');
+    await ctx.reply(
+      'Пожалуйста, ответьте на сообщение заявки текстом причины отказа (reply).'
+    );
+  });
+
+  bot.on('message', async (ctx: Context) => {
+    const chatId = ctx.chat?.id;
+    if (!chatId || chatId > 0) return; // только канал/группа
+    const msg = ctx.message as any | undefined;
+    if (!msg) return;
+    const replyTo = msg.reply_to_message?.message_id as number | undefined;
+    if (!replyTo) return;
+    const uid = pendingReasonByMsg.get(replyTo);
+    if (!uid) return;
+    const reason = 'text' in msg ? (msg.text as string) : '(нет текста)';
+    pendingReasonByMsg.delete(replyTo);
+    await setVerificationStatus(uid, 'REJECTED', reason);
+    await ctx.reply(`Отказ сохранён: ${uid}. Причина: ${reason}`);
+    try {
+      await ctx.telegram.sendMessage(uid, `Верификация отклонена. Причина: ${reason}`);
+    } catch {}
   });
 }

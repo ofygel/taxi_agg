@@ -1,148 +1,179 @@
-import { Markup } from 'telegraf';
-import { SUB_PRICE_7, SUB_PRICE_15, SUB_PRICE_30, SUB_WARN_HOURS, DRIVERS_CHANNEL_INVITE } from '../config';
-import { bot } from '../bot';
-import type { MyContext, WaitReceipt } from '../types';
-import { getSetting } from '../supabase';
-import { supabase } from '../supabase';
-import { kbBackHome } from './home';
-import { saveTelegramFileToStorage } from '../storage';
-import { isAdmin, nowIso, replaceWith, sendEphemeral } from '../utils';
-import { upsertProfile } from './shared';
+import { Telegraf, type Context, Markup } from 'telegraf';
+import { ensureSession, sendReplacing } from '@/shared';
+import {
+  getSetting,
+  saveReceipt,
+  openAccess,
+  inviteButtonUrl
+} from '@/supabase';
 
-const subRejectWait = new Map<number, number>();
+const PLAN_LABEL: Record<number, string> = {
+  7: '7 дней — 3000 ₸',
+  15: '15 дней — 5000 ₸',
+  30: '30 дней — 10000 ₸'
+};
+const PLAN_PRICE: Record<number, number> = { 7: 3000, 15: 5000, 30: 10000 };
 
-function subPricesKb() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback(`7 дн — ${SUB_PRICE_7} тг`, 'sub_7')],
-    [Markup.button.callback(`15 дн — ${SUB_PRICE_15} тг`, 'sub_15')],
-    [Markup.button.callback(`30 дн — ${SUB_PRICE_30} тг`, 'sub_30')],
-    [Markup.button.callback('🔙 На главную', 'go_home')]
-  ]);
-}
-
-async function startReceiptWait(ctx: MyContext, periodDays: number, amount: number) {
-  ctx.session = ctx.session || {};
-  ctx.session.sub = { waitReceipt: { periodDays, amount } };
-  await ctx.reply(
-    `Сумма оплаты: <b>${amount} тг</b> за ${periodDays} дней.\nПришлите <b>скрин/файл чека</b> одним сообщением.`,
-    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('🔙 На главную', 'go_home')]]) }
-  );
-}
-
-export function installSubscriptions() {
-  bot.action('sub_buy', async (ctx) => {
+export function register(bot: Telegraf<Context>) {
+  bot.action('sub_buy', async (ctx: Context) => {
     await ctx.answerCbQuery();
-    try { await (ctx as any).deleteMessage?.(); } catch { }
-    return ctx.reply(
-      'Выберите срок подписки. Оплата Kaspi Gold «4400 4302 1304 3729 Алма С» или по номеру «747 456 86 61 Алма С».',
-      subPricesKb()
+    await sendReplacing(
+      ctx,
+      'Выберите срок подписки:',
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback('7', 'plan_7'),
+          Markup.button.callback('15', 'plan_15'),
+          Markup.button.callback('30', 'plan_30')
+        ],
+        [Markup.button.callback('↩️ Отмена', 'sub_cancel')]
+      ])
     );
   });
-  bot.action('sub_7', async (ctx) => { await ctx.answerCbQuery(); return startReceiptWait(ctx, 7, SUB_PRICE_7); });
-  bot.action('sub_15', async (ctx) => { await ctx.answerCbQuery(); return startReceiptWait(ctx, 15, SUB_PRICE_15); });
-  bot.action('sub_30', async (ctx) => { await ctx.answerCbQuery(); return startReceiptWait(ctx, 30, SUB_PRICE_30); });
 
-  // media handler — подключается в registry через экспорт:
-}
-
-export async function subscriptionMediaHandler(ctx: MyContext): Promise<boolean> {
-  const wait = ctx.session?.sub?.waitReceipt as WaitReceipt | undefined;
-  if (!wait) return false;
-
-  const verifyChannelId = Number(await getSetting('verify_channel_id')) || 0;
-  if (!verifyChannelId) { await sendEphemeral(ctx, 'Канал модерации не привязан. /bind_verify_channel', kbBackHome()); return true; }
-
-  let file_id: string | null = null;
-  if ((ctx.message as any).photo) file_id = (ctx.message as any).photo.slice(-1)[0].file_id;
-  if ((ctx.message as any).document) file_id = (ctx.message as any).document.file_id;
-
-  let stored: any = null;
-  if (file_id) stored = await saveTelegramFileToStorage(ctx.from!.id, 'SUBSCRIPTION_RECEIPT', file_id);
-
-  await supabase.from('driver_subscriptions').insert({
-    user_telegram_id: ctx.from!.id,
-    period_days: wait.periodDays,
-    amount_tg: wait.amount,
-    receipt_file_id: stored?.path || null,
-    status: 'PENDING'
+  bot.action('sub_cancel', async (ctx: Context) => {
+    await ctx.answerCbQuery();
+    await sendReplacing(ctx, 'Отменено.');
   });
 
-  const caption = `🧾 Чек подписки\nПользователь: ${ctx.from!.id}\nПериод: ${wait.periodDays} дн\nСумма: ${wait.amount} тг\nStorage: ${stored?.path || '-'}`;
-  await bot.telegram.sendMessage(verifyChannelId, caption, {
-    ...Markup.inlineKeyboard([
-      [Markup.button.callback(`Открыть доступ (${wait.periodDays} дн)`, `sub_approve:${ctx.from!.id}:${wait.periodDays}`)],
-      [Markup.button.callback('Отказать', 'sub_reject:' + ctx.from!.id)]
-    ])
+  bot.action(/plan_(7|15|30)/, async (ctx: Context) => {
+    await ctx.answerCbQuery();
+    const match = (ctx as any).match as RegExpExecArray | undefined;
+    const days = Number(match?.[1] ?? 7);
+    const price = PLAN_PRICE[days];
+    const text = `Оплата: ${PLAN_LABEL[days]}
+
+Номер карты Kaspi Gold: 4400 4302 1304 3729 (Алма С)
+Или по номеру: 747 456 86 61 (Алма С)
+
+Сумма к оплате: ${price} ₸
+
+После оплаты нажмите «Отправить чек».`;
+    await sendReplacing(
+      ctx,
+      text,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('📎 Отправить чек', `send_receipt:${days}`)]
+      ])
+    );
   });
 
-  ctx.session.sub = null;
-  await sendEphemeral(ctx, 'Чек отправлен модераторам. Ожидайте.', kbBackHome());
-  return true;
-}
-
-export function installSubscriptionsActions() {
-  bot.action(/sub_approve:(\d+):(\d+)/, async (ctx) => {
-    if (!isAdmin(ctx)) return ctx.answerCbQuery('Только модераторы.');
-    await ctx.answerCbQuery('OK');
-    const uid = Number((ctx.match as any)[1]); const days = Number((ctx.match as any)[2]);
-    const expires = new Date(Date.now() + days * 24 * 3600 * 1000).toISOString();
-    await upsertProfile(uid, { subscription_expires_at: expires, last_warn_at: null });
-    await supabase.from('driver_subscriptions')
-      .update({ status: 'APPROVED', approved_at: nowIso(), moderator_id: ctx.from!.id })
-      .eq('user_telegram_id', uid).eq('status', 'PENDING');
-    try { await (ctx as any).editMessageReplyMarkup?.({ inline_keyboard: [] }); } catch { }
-    const btn = DRIVERS_CHANNEL_INVITE
-      ? Markup.inlineKeyboard([[Markup.button.url('✅ Вступить', DRIVERS_CHANNEL_INVITE)], [Markup.button.callback('🔙 На главную', 'go_home')]])
-      : kbBackHome();
-    try { await bot.telegram.sendMessage(uid, `💳 Оплата подтверждена. Подписка активна до: ${new Date(expires).toLocaleString()}.`, btn); } catch { }
+  bot.action(/send_receipt:(7|15|30)/, async (ctx: Context) => {
+    await ctx.answerCbQuery();
+    const s = ensureSession(ctx);
+    s.collecting = true;
+    s.files = [];
+    s.supportThreadId = Number(((ctx as any).match as RegExpExecArray)?.[1]);
+    await sendReplacing(ctx, 'Прикрепите скриншот/файл чека одним сообщением.');
   });
 
-  bot.action(/sub_reject:(\d+)/, async (ctx) => {
-    if (!isAdmin(ctx)) return ctx.answerCbQuery('Только модераторы.');
-    await ctx.answerCbQuery('Пришлите причину отклонения одним сообщением');
-    subRejectWait.set(ctx.from!.id, Number((ctx.match as any)[1]));
-  });
+  bot.on(['photo', 'document'], async (ctx: Context) => {
+    const s = ensureSession(ctx);
+    if (!s.collecting) return;
 
-  bot.on('text', async (ctx, next) => {
-    const modId = ctx.from?.id || 0; const chId = (ctx.chat as any)?.id;
-    if (chId && subRejectWait.has(modId)) {
-      const uid = subRejectWait.get(modId)!;
-      subRejectWait.delete(modId);
-      await supabase.from('driver_subscriptions')
-        .update({ status: 'REJECTED', reject_reason: (ctx.message as any).text, moderator_id: modId, approved_at: null })
-        .eq('user_telegram_id', uid).eq('status', 'PENDING');
-      try { await bot.telegram.sendMessage(uid, `❌ Оплата подписки отклонена.\nПричина: ${(ctx.message as any).text}`); } catch { }
-      return;
+    const verifyChan = await getSetting('verify_channel_id');
+    if (!verifyChan)
+      return ctx.reply(
+        'Канал модерации не привязан. /bind_verify_channel в канале.'
+      );
+
+    const files: any[] = [];
+    const m = ctx.message;
+    if (!m) return;
+
+    if ('photo' in m && Array.isArray(m.photo)) {
+      const p = m.photo[m.photo.length - 1];
+      files.push({ file_id: p.file_id });
+    } else if ('document' in m && m.document) {
+      files.push({
+        file_id: m.document.file_id,
+        file_name: m.document.file_name ?? undefined,
+        mime_type: m.document.mime_type ?? undefined,
+        size: m.document.file_size ?? undefined
+      });
     }
-    return next();
-  });
-}
+    const planDays = Number(s.supportThreadId ?? 0) || 7;
+    for (const f of files) await saveReceipt((ctx.from as any).id, planDays, f);
 
-/** CRON */
-export function installSubscriptionCron() {
-  setInterval(async () => {
+    await ctx.telegram.sendMessage(
+      verifyChan,
+      `Поступил чек об оплате\nПользователь: @${
+        (ctx.from as any).username ?? (ctx.from as any).id
+      }\nТариф: ${PLAN_LABEL[planDays]}`,
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            '🔓 Открыть доступ',
+            `pay_open:${(ctx.from as any).id}:${planDays}`
+          )
+        ],
+        [
+          Markup.button.callback(
+            '❌ Отказать',
+            `pay_reject:${((ctx.from as any).id as number)}`
+          )
+        ]
+      ])
+    );
+
+    s.collecting = false;
+    s.files = [];
+    await sendReplacing(ctx, 'Чек отправлен на проверку. Ожидайте.');
+  });
+
+  bot.action(/pay_open:(\d+):(\d+)/, async (ctx: Context) => {
+    await ctx.answerCbQuery();
+    const match = (ctx as any).match as RegExpExecArray | undefined;
+    if (!match) return;
+    const userId = Number(match[1]);
+    const days = Number(match[2]);
+    await openAccess(userId, days);
+    const invite = (await getSetting('drivers_channel_invite')) ?? inviteButtonUrl();
+    await ctx.editMessageText(`Доступ открыт: ${userId} на ${days} дней.`);
+    if (invite) {
+      try {
+        await ctx.telegram.sendMessage(
+          userId,
+          `Оплата подтверждена. Нажмите, чтобы вступить в канал заказов:`,
+          Markup.inlineKeyboard([[Markup.button.url('🔗 Вступить', invite)]])
+        );
+      } catch {}
+    } else {
+      try {
+        await ctx.telegram.sendMessage(
+          userId,
+          'Оплата подтверждена. Ссылка на канал пока не настроена.'
+        );
+      } catch {}
+    }
+  });
+
+  const pendingPayReject = new Map<number, number>(); // msgId → userId
+
+  bot.action(/pay_reject:(\d+)/, async (ctx: Context) => {
+    await ctx.answerCbQuery('Ответьте на это сообщение причиной отказа.');
+    const msg = (ctx.update as any).callback_query?.message as any | undefined;
+    const msgId = msg?.message_id as number | undefined;
+    if (typeof msgId === 'number') {
+      const uid = Number(((ctx as any).match as RegExpExecArray)[1]);
+      pendingPayReject.set(msgId, uid);
+    }
+  });
+
+  bot.on('message', async (ctx: Context) => {
+    const chatId = ctx.chat?.id;
+    if (!chatId || chatId > 0) return; // только канал/группа модерации
+    const msg = ctx.message as any | undefined;
+    if (!msg) return;
+    const replyTo = msg.reply_to_message?.message_id as number | undefined;
+    if (!replyTo) return;
+    const uid = pendingPayReject.get(replyTo);
+    if (!uid) return;
+    const reason = 'text' in msg ? (msg.text as string) : '(нет текста)';
+    pendingPayReject.delete(replyTo);
+    await ctx.reply(`Отказ по оплате сохранён: ${uid}. Причина: ${reason}`);
     try {
-      const { data: profs } = await supabase.from('driver_profiles').select('user_telegram_id,subscription_expires_at,last_warn_at');
-      const ordersChannelId = Number(await getSetting('drivers_channel_id')) || 0;
-      const now = new Date();
-      for (const p of (profs || [])) {
-        if (!p.subscription_expires_at) continue;
-        const exp = new Date(p.subscription_expires_at as any);
-        const warnTime = new Date(exp.getTime() - SUB_WARN_HOURS * 3600 * 1000);
-        if (!p.last_warn_at && now >= warnTime && now < exp) {
-          try { await bot.telegram.sendMessage(p.user_telegram_id as any, `⚠️ Подписка истекает ${exp.toLocaleString()}. Продлите через «Купить подписку».`); } catch { }
-          await upsertProfile(p.user_telegram_id as any, { last_warn_at: new Date().toISOString() });
-        }
-        if (now >= exp && ordersChannelId) {
-          try {
-            const until = Math.floor(Date.now() / 1000) + 30;
-            // FIX: объект с until_date
-            await bot.telegram.banChatMember(ordersChannelId, p.user_telegram_id as any, { until_date: until } as any);
-            await bot.telegram.unbanChatMember(ordersChannelId, p.user_telegram_id as any);
-            await bot.telegram.sendMessage(p.user_telegram_id as any, `⛔ Подписка истекла. Доступ к каналу закрыт. Оформите заново через «Купить подписку».`);
-          } catch { }
-        }
-      }
-    } catch (e) { console.error('subscriptionCron', e); }
-  }, 120_000);
+      await ctx.telegram.sendMessage(uid, `Оплата отклонена. Причина: ${reason}`);
+    } catch {}
+  });
 }

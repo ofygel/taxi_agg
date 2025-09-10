@@ -1,74 +1,51 @@
-// src/index.ts
 import 'dotenv/config';
-import express from 'express';
-import { bot } from './bot';
-import { IS_PROD, WEBHOOK_DOMAIN, WEBHOOK_PATH, PORT } from './config';
+import { bot } from '@/bot';
 
 // модули
-import * as home         from './modules/home';
-import * as roles        from './modules/roles';
-import * as storage      from './modules/storage';
-import * as support      from './modules/support';
-import * as subscription from './modules/subscription';
-import * as verification from './modules/verification';
-import * as user_phone   from './modules/user_phone';
-import * as orders       from './modules/orders';
-import * as client_flow  from './modules/client_flow';
+import * as home         from '@/modules/home';
+import * as roles        from '@/modules/roles';
+import * as phone        from '@/modules/phone';
+import * as verification from '@/modules/verification';
+import * as subscription from '@/modules/subscription';
+import * as support      from '@/modules/support';
+import * as orders       from '@/modules/orders';
+import * as client_flow  from '@/modules/client_flow';
+import * as admin        from '@/modules/admin';
 
-type Registrar = (b: typeof bot) => void;
-const isFunc = (f: unknown): f is Registrar => typeof f === 'function';
+// регистрация
+[home, roles, phone, verification, subscription, support, orders, client_flow, admin]
+  .forEach((m: any) => typeof m.register === 'function' && m.register(bot));
 
-/** Универсальная регистрация: ищем любую «ожидаемую» точку входа */
-function register(ns: Record<string, unknown>) {
-  const candidates = [
-    'register', 'init', 'mount', 'setup', 'default',
-    'registerHome', 'registerRoles', 'registerStorage',
-    'registerSupport', 'registerSubscription'
-  ];
-  for (const key of candidates) {
-    const fn = (ns as any)[key];
-    if (isFunc(fn)) {
-      fn(bot);
-      return;
+// периодические задачи: напоминание о продлении/кик (каждые 30 мин; для реального кика нужен supergroup)
+import { supabase, getSubscription } from '@/supabase';
+import { getSetting } from '@/supabase';
+
+setInterval(async () => {
+  const chan = await getSetting('drivers_channel_id');
+  if (!chan) return;
+  const { data, error } = await supabase.from('subscriptions').select('*');
+  if (error || !data) return;
+  const now = Date.now();
+
+  for (const s of data) {
+    const until = Date.parse(s.until_ts);
+    if (Number.isNaN(until)) continue;
+    const uid = s.telegram_id as number;
+    const left = until - now;
+    if (left < 0) {
+      // срок истёк — предупредим и «кикнем» (для каналов может не сработать, для супергрупп — да)
+      try {
+        await bot.telegram.sendMessage(uid, 'Подписка истекла. Продлите, чтобы продолжить получать заказы.');
+        await bot.telegram.banChatMember(Number(chan), uid).catch(()=>{});
+        await bot.telegram.unbanChatMember(Number(chan), uid, { only_if_banned: true }).catch(()=>{});
+      } catch {}
+    } else if (left < 12 * 3600 * 1000) {
+      // осталось менее 12 часов — напоминание
+      try { await bot.telegram.sendMessage(uid, 'Подписка скоро истечёт (менее 12 часов). Не забудьте продлить.'); } catch {}
     }
   }
-  // если в модуле ничего не нашли — пропускаем
-}
+}, 30 * 60 * 1000);
 
-// регистрируем все модули
-[home, roles, storage, support, subscription, verification, user_phone, orders, client_flow].forEach(register);
-
-// глобальный catcher
-bot.catch((err, ctx) => {
-  console.error('Bot error', err);
-  try {
-    ctx.reply('Произошла ошибка. Попробуйте позже.').catch(() => {});
-  } catch {}
-});
-
-async function launch() {
-  if (IS_PROD) {
-    if (!WEBHOOK_DOMAIN) {
-      throw new Error('WEBHOOK_DOMAIN is not defined in environment variables');
-    }
-    if (!/^https:\/\/.+/i.test(WEBHOOK_DOMAIN)) {
-      throw new Error('TELEGRAM_WEBHOOK_DOMAIN должен быть публичным https-URL');
-    }
-
-    const app = express();
-    app.use(bot.webhookCallback(WEBHOOK_PATH));
-    app.get('/', (_req, res) => res.send('OK'));
-    app.listen(PORT, async () => {
-      await bot.telegram.setWebhook(`${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`);
-      console.log(`Webhook set → ${WEBHOOK_DOMAIN}${WEBHOOK_PATH} (port ${PORT})`);
-    });
-  } else {
-    await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
-    await bot.launch({ dropPendingUpdates: true });
-    console.log('Started polling (dev)');
-    process.once('SIGINT', () => bot.stop('SIGINT'));
-    process.once('SIGTERM', () => bot.stop('SIGTERM'));
-  }
-}
-
-launch();
+bot.launch();
+process.once('SIGINT',  () => {});
+process.once('SIGTERM', () => {});

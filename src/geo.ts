@@ -1,59 +1,70 @@
-import fetch from 'node-fetch';
-
-import { CITY_BOUNDS, CITY_NAME, TWO_GIS_API_KEY, TWO_GIS_OPEN_URL } from './config';
-
-export async function twoGisSuggest(q: string) {
-  if (!TWO_GIS_API_KEY) return null;
-  const url = `https://catalog.api.2gis.com/3.0/suggests?q=${encodeURIComponent(q)}&key=${TWO_GIS_API_KEY}&fields=items.point,items.full_address_name`;
-  try {
-    const r = await fetch(url);
-    if (!r.ok) return null;
-    const j: any = await r.json();
-    const items = j?.result?.items || [];
-    return items
-      .filter((i: any) => i.point?.lat && i.point?.lon)
-      .slice(0, 5)
-      .map((i: any) => ({
-        label: i.full_address_name || i.name,
-        lat: Number(i.point.lat),
-        lon: Number(i.point.lon)
-      }));
-  } catch { return null; }
+export function haversineKm(
+  a: { lat: number; lon: number },
+  b: { lat: number; lon: number }
+) {
+  const R = 6371;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLon = ((b.lon - a.lon) * Math.PI) / 180;
+  const la1 = (a.lat * Math.PI) / 180;
+  const la2 = (b.lat * Math.PI) / 180;
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.sin(dLon / 2) ** 2 * Math.cos(la1) * Math.cos(la2);
+  const c = 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+  return R * c;
 }
 
-export async function twoGisGeocode(q: string) {
-  if (!TWO_GIS_API_KEY) return null;
-  const url = `https://catalog.api.2gis.com/3.0/items/geocode?q=${encodeURIComponent(q)}&key=${TWO_GIS_API_KEY}&fields=items.point,items.full_address_name`;
-  try {
-    const r = await fetch(url);
-    if (!r.ok) return null;
-    const j: any = await r.json();
-    const items = j?.result?.items || [];
-    return items
-      .filter((i: any) => i.point?.lat && i.point?.lon)
-      .slice(0, 5)
-      .map((i: any) => ({
-        label: i.full_address_name || i.name,
-        lat: Number(i.point.lat),
-        lon: Number(i.point.lon)
-      }));
-  } catch { return null; }
+export function parseMapLink(text?: string | null):
+  | { lat: number; lon: number; label?: string }
+  | null {
+  if (!text) return null;
+  const t = text.trim();
+
+  const m2 = t.match(/[?&]m=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:,\d+)?/i);
+  if (m2) {
+    const lon = Number(m2[1]);
+    const lat = Number(m2[2]);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
+  }
+
+  const g2 = t.match(/\/geo\/(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/i);
+  if (g2) {
+    const lat = Number(g2[1]);
+    const lon = Number(g2[2]);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
+  }
+
+  const gg = t.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),/);
+  if (gg) {
+    const lat = Number(gg[1]);
+    const lon = Number(gg[2]);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
+  }
+
+  const gg2 = t.match(/[?&]q=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/);
+  if (gg2) {
+    const lat = Number(gg2[1]);
+    const lon = Number(gg2[2]);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
+  }
+
+  const ya = t.match(/[?&]ll=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/);
+  if (ya) {
+    const lon = Number(ya[1]);
+    const lat = Number(ya[2]);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
+  }
+
+  const osm = t.match(/[?&]map=\d+\/(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)/);
+  if (osm) {
+    const lat = Number(osm[1]);
+    const lon = Number(osm[2]);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
+  }
+
+  return null;
 }
 
-export async function nominatimSearch(q: string) {
-  const [lonMin, latMin, lonMax, latMax] = CITY_BOUNDS.split(/[;,]/).map(Number);
-  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=5&bounded=1&viewbox=${lonMin},${latMax},${lonMax},${latMin}&q=${encodeURIComponent(q + ' ' + CITY_NAME)}`;
-  try {
-    const r = await fetch(url, { headers: { 'User-Agent': 'tg-bot' } as any });
-    if (!r.ok) return null;
-    const j: any[] = await r.json();
-    return j.slice(0, 5).map((i: any) => ({ label: i.display_name, lat: Number(i.lat), lon: Number(i.lon) }));
-  } catch { return null; }
-}
-
-export async function geocodeSuggest(q: string) {
-  let s = await twoGisSuggest(q);
-  if ((!s || !s.length)) s = await twoGisGeocode(q);
-  if ((!s || !s.length)) s = await nominatimSearch(q);
-  return s || [];
+export function makeGeoLink(p: { lat: number; lon: number }) {
+  return `https://2gis.kz/geo/${p.lat},${p.lon}`;
 }
