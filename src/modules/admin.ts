@@ -26,8 +26,9 @@ export function register(bot: Telegraf<Context>) {
   // Telegraf не обрабатывает команды внутри каналов по умолчанию,
   // поэтому перехватываем channel_post и выполняем нужный обработчик вручную
   bot.on('channel_post', async (ctx) => {
-    const text = ctx.channelPost?.text;
-    if (!text) return;
+    const post = ctx.channelPost;
+    if (!post || !('text' in post)) return;
+    const text = post.text;
     if (text.startsWith('/bind_verify_channel')) return bindVerify(ctx as any);
     if (text.startsWith('/bind_drivers_channel')) return bindDrivers(ctx as any);
   });
