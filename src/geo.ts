@@ -1,4 +1,3 @@
-// Node 18
 import fetch from 'node-fetch';
 
 import { CITY_BOUNDS, CITY_NAME, TWO_GIS_API_KEY, TWO_GIS_OPEN_URL } from './config';

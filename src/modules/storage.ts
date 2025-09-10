@@ -1,10 +1,10 @@
 // Node 18 совместимость
 import fetch from 'node-fetch';
 
-import { supabase } from './supabase';
-import { STORAGE_BUCKET, SIGNED_URL_TTL_SECONDS } from './config';
-import type { MyContext } from './types';
-import { bot } from './bot';
+import { supabase } from '../supabase';
+import { STORAGE_BUCKET, SIGNED_URL_TTL_SECONDS } from '../config';
+import type { MyContext } from '../types';
+import { bot } from '../bot';
 
 export async function downloadTelegramFileUrl(file_id: string): Promise<string | null> {
   try {

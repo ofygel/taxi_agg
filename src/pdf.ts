@@ -1,7 +1,7 @@
 import PDFDocument from 'pdfkit';
 import type PDFKit from 'pdfkit';
 import { fmtPhone } from './utils';
-import { getStorageBuffer } from './storage';
+import { getStorageBuffer } from './modules/storage';
 import { PDF_LOGO_PATH, PDF_STAMP_PATH } from './config';
 
 export function makeReceiptText(o: any, driver: any, client: any) {

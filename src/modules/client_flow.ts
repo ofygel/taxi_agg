@@ -1,7 +1,7 @@
 // src/modules/client_flow.ts
 import { Composer, Markup, Telegraf } from 'telegraf';
 import type { MyContext, ClientOrderSession } from '../types';
-import { supabase } from './supabase';
+import { supabase } from '../supabase';
 import { getSetting } from './settings';
 import {
   sendEphemeral,

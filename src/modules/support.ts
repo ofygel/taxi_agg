@@ -1,5 +1,5 @@
 import { bot } from '../bot';
-import { getSetting } from '../supabase';
+import { getSetting } from './supabase';
 import { kbBackHome } from './home';
 import { replaceWith, sendEphemeral } from '../utils';
 
