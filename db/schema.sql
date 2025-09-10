@@ -1,7 +1,9 @@
 -- Database schema for taxi aggregation service
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 
 -- Users table
-CREATE TABLE public.users (
+CREATE TABLE IF NOT EXISTS public.users (
   telegram_id BIGINT PRIMARY KEY,
   phone TEXT,
   first_name TEXT,
@@ -19,7 +21,7 @@ CREATE POLICY "Users are self" ON public.users
   WITH CHECK (telegram_id = (current_setting('request.jwt.claims', true)::jsonb->>'telegram_id')::bigint);
 
 -- Profiles table
-CREATE TABLE public.profiles (
+CREATE TABLE IF NOT EXISTS public.profiles (
   telegram_id BIGINT PRIMARY KEY REFERENCES public.users(telegram_id) ON DELETE CASCADE,
   full_name TEXT,
   phone TEXT,
@@ -36,7 +38,7 @@ CREATE POLICY "Profiles are self" ON public.profiles
   WITH CHECK (telegram_id = (current_setting('request.jwt.claims', true)::jsonb->>'telegram_id')::bigint);
 
 -- App settings
-CREATE TABLE public.app_settings (
+CREATE TABLE IF NOT EXISTS public.app_settings (
   key TEXT PRIMARY KEY,
   value TEXT
 );
@@ -48,7 +50,7 @@ CREATE POLICY "Public read app settings" ON public.app_settings
   USING (((current_setting('request.jwt.claims', true)::jsonb->>'telegram_id')::bigint IS NOT NULL));
 
 -- Verifications
-CREATE TABLE public.verifications (
+CREATE TABLE IF NOT EXISTS public.verifications (
   telegram_id BIGINT PRIMARY KEY REFERENCES public.users(telegram_id) ON DELETE CASCADE,
   role TEXT CHECK (role IN ('DRIVER','COURIER','CLIENT')),
   status TEXT CHECK (status IN ('PENDING','APPROVED','REJECTED')),
@@ -65,7 +67,7 @@ CREATE POLICY "Verifications are self" ON public.verifications
   WITH CHECK (telegram_id = (current_setting('request.jwt.claims', true)::jsonb->>'telegram_id')::bigint);
 
 -- Subscriptions
-CREATE TABLE public.subscriptions (
+CREATE TABLE IF NOT EXISTS public.subscriptions (
   telegram_id BIGINT PRIMARY KEY REFERENCES public.users(telegram_id) ON DELETE CASCADE,
   until_ts TIMESTAMPTZ NOT NULL,
   plan_days INTEGER NOT NULL,
@@ -80,7 +82,7 @@ CREATE POLICY "Subscriptions are self" ON public.subscriptions
   WITH CHECK (telegram_id = (current_setting('request.jwt.claims', true)::jsonb->>'telegram_id')::bigint);
 
 -- Receipts
-CREATE TABLE public.receipts (
+CREATE TABLE IF NOT EXISTS public.receipts (
   id BIGSERIAL PRIMARY KEY,
   telegram_id BIGINT NOT NULL REFERENCES public.users(telegram_id) ON DELETE CASCADE,
   plan_days INTEGER NOT NULL,
@@ -96,7 +98,7 @@ CREATE POLICY "Receipts are self" ON public.receipts
   WITH CHECK (telegram_id = (current_setting('request.jwt.claims', true)::jsonb->>'telegram_id')::bigint);
 
 -- Orders
-CREATE TABLE public.orders (
+CREATE TABLE IF NOT EXISTS public.orders (
   id BIGSERIAL PRIMARY KEY,
   client_id BIGINT NOT NULL REFERENCES public.users(telegram_id) ON DELETE CASCADE,
   driver_id BIGINT REFERENCES public.users(telegram_id) ON DELETE SET NULL,
@@ -139,7 +141,7 @@ CREATE POLICY "Client or driver update own order" ON public.orders
   );
 
 -- Media assets
-CREATE TABLE public.media_assets (
+CREATE TABLE IF NOT EXISTS public.media_assets (
   id BIGSERIAL PRIMARY KEY,
   owner_telegram_id BIGINT NOT NULL REFERENCES public.users(telegram_id) ON DELETE CASCADE,
   kind TEXT NOT NULL,
